@@ -13,7 +13,6 @@ from geometry_msgs.msg import Pose
 from geometry_msgs.msg import PoseArray
 
 from msgs_perception.msg import ObstacleArray, Obstacle, StereoCloudImage
-from geometry_msgs.msg import PoseWithCovarianceStamped
 
 from inference import inference_detector, init_detector
 
@@ -70,7 +69,6 @@ class RGB2Ddetection(object):
 		self.model = init_detector(self.config_file, self.checkpoint_file, device=device)
 		print("init detector ... ")
 
-		self.current_pose=None
 		self.img=None
 		self.rgb=None
 		self.pc_rgb=None
@@ -107,7 +105,6 @@ class RGB2Ddetection(object):
 		# self.cloud_plus_image = rospy.Subscriber("/carina/perception/stereo/cloud_plus_image", StereoCloudImage, self.stereo_cloud_image_callback)
 		self.image_sub = rospy.Subscriber(self.image_topic, Image, self.rgb_image_cb, queue_size=1)
 		self.shutdown_sub = rospy.Subscriber('/carina/vehicle/shutdown', Bool, self.shutdown_cb, queue_size=1)
-		self.current_pose_sub = rospy.Subscriber('/carina/localization/pose', PoseWithCovarianceStamped, self.pose_cb, queue_size=1)
 
 
 		#publisher
@@ -126,9 +123,6 @@ class RGB2Ddetection(object):
 		self.speed_constraint_pub = rospy.Publisher('/carina/control/speed_constraint', SpeedConstraint, queue_size=1)
 
 
-	def pose_cb(self, msg):
-		self.current_pose = msg
-
 	def rgb_image_cb(self,im):
 
 		stamp=im.header.stamp
@@ -145,12 +139,6 @@ class RGB2Ddetection(object):
 
 
 	def stereo_cloud_callback(self,data):
-		start_time = time.time()
-
-		if self.img is None or self.current_pose is None:
-			return
-
-
 		img =copy.deepcopy(self.img)
 		self.rgb = img[...,::-1]
 
@@ -177,14 +165,15 @@ class RGB2Ddetection(object):
 		            self.pub_img.publish(self.cvbridge.cv2_to_imgmsg(img0, "bgr8"))
 		        except CvBridgeError as e:
 		            print (e)
-		# print("--- %s seconds ---" % (time.time() - start_time))
 
 
 
 
 	def process_detect(self, masks, bboxes, scores, labels, img_orig, point_cloud, stamp):
 
-
+		pedestrian_presence=False
+		bycicle_presence=False
+		emergency_presence=False
 
 		pc=point_cloud
 
@@ -212,22 +201,13 @@ class RGB2Ddetection(object):
 
 		points_cloud=[]
 
-		publish_constarint_ped_bicy_rignt=False
-
-		dis_to_obs_byci_ped=100
-
 		for mask, box, conf, cls  in zip(masks, bboxes, scores, labels):
 			x0,x1,x2,x3 = box
 			label = self.classes[int(cls)]
 
-
-			pedestrian_presence=False
-			bycicle_presence=False
-			emergency_presence=False
-
 			if label == 'pedestrian':
 				pedestrian_presence=True
-			if label == 'bicycle':
+			if label == 'bycicle':
 				bycicle_presence=True
 			if label == 'emergency':
 				emergency_presence=True
@@ -444,26 +424,16 @@ class RGB2Ddetection(object):
 				velo_objs_stereo.obstacle.append(obj_velo)
 
 
-			if (pedestrian_presence or (bycicle_presence and (pt[0]>0.75))) and dist_to_obstacle < 20 :    #emergency_presence or 
+		if (pedestrian_presence or emergency_presence or (bycicle_presence and (pt[0]>1.5))) and dist_to_obstacle < 25 :
+			collision_constraint = SpeedConstraint()
+			collision_constraint.header.stamp = rospy.Time().now()
+			
+			if dist_to_obstacle > 10:
+				collision_constraint.speed = 0.8
+			else:
+				collision_constraint.speed = 0.2
 
-				if (dist_to_obstacle < dis_to_obs_byci_ped):
-
-					dis_to_obs_byci_ped=dist_to_obstacle
-
-					collision_constraint = SpeedConstraint()
-					collision_constraint.header.stamp = rospy.Time().now()
-					if dist_to_obstacle > 7:
-						if dist_to_obstacle > 15:
-							collision_constraint.speed = 1.8
-						else:
-							collision_constraint.speed = 0.8
-
-					else:
-						collision_constraint.speed = 0.2
-					collision_constraint.reason = "\033[31m[From 2d_detection node] "+str(label)+"  presence: \033[0m" + " " +str(dist_to_obstacle) +" meters"
-					publish_constarint_ped_bicy_rignt=True
-
-		if publish_constarint_ped_bicy_rignt:	
+			collision_constraint.reason = "\033[31m[From 2d_detection node] "+str(label)+"  presence: \033[0m" + " " +str(dist_to_obstacle) +" meters"
 			self.speed_constraint_pub.publish(collision_constraint)
 
 
